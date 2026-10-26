@@ -1,0 +1,15 @@
+services:
+  github-watcher:
+    build: .
+    image: github-watcher:latest
+    container_name: github-watcher
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

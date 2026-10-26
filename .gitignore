@@ -1,0 +1,15 @@
+# секреты — НИКОГДА не коммитить
+.env
+.env.*
+!.env.example
+
+# данные работы сервиса
+data/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.idea/
+.vscode/
