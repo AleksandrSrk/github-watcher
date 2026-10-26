@@ -1,20 +1,17 @@
 import time
 
-import httpx
 import pytest
 
 from app.db import Store
-from app.github import GitHub
 from app.report import build_report, split_messages
 from app.watcher import run_cycle
-from tests.test_watcher import USER, FakeGitHub
+from tests.test_watcher import USER, FakeGitHub, make_gh
 
 
 @pytest.fixture
 def env():
     fake = FakeGitHub()
-    client = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(fake.handler))
-    return fake, GitHub("t", USER, client=client), Store(":memory:")
+    return fake, make_gh(fake), Store(":memory:")
 
 
 async def test_initial_report_shows_everything_already_there(env):

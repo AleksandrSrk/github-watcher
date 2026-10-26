@@ -49,30 +49,46 @@ class CycleResult:
 
 
 async def check_repo(gh: GitHub, store: Store, repo: str) -> RepoReport:
+    """Каждый источник обрабатывается отдельно: сбой одного запроса не теряет остальные данные."""
     rep = RepoReport(repo)
-    try:
-        views, clones, refs, paths, stars, forks, watchers, issues = await asyncio.gather(
-            gh.traffic(repo, "views"),
-            gh.traffic(repo, "clones"),
-            gh.referrers(repo),
-            gh.paths(repo),
-            gh.stargazers(repo),
-            gh.forks(repo),
-            gh.watchers(repo),
-            gh.foreign_issues(repo),
-        )
-        rep.views, rep.view_uniques = store.save_traffic(repo, "views", views)
-        rep.clones, _ = store.save_traffic(repo, "clones", clones)
-        rep.referrers = refs
-        rep.paths = paths
-        rep.new_referrers = store.new_referrers(repo, [r["name"] for r in refs])
-        rep.stars_added, rep.stars_removed = store.sync_members("star", repo, stars)
-        rep.forks_added, _ = store.sync_members("fork", repo, forks)
-        rep.watchers_added, _ = store.sync_members("watch", repo, watchers)
-        rep.new_issues = store.new_issues(repo, issues)
-    except Exception as e:  # один сломанный репо не должен ронять весь проход
-        log.exception("[%s] ошибка", repo)
-        rep.error = str(e)
+    names = ("views", "clones", "referrers", "paths", "stars", "forks", "watchers", "issues")
+    results = await asyncio.gather(
+        gh.traffic(repo, "views"),
+        gh.traffic(repo, "clones"),
+        gh.referrers(repo),
+        gh.paths(repo),
+        gh.stargazers(repo),
+        gh.forks(repo),
+        gh.watchers(repo),
+        gh.foreign_issues(repo),
+        return_exceptions=True,
+    )
+    data, errors = {}, []
+    for name, res in zip(names, results):
+        if isinstance(res, Exception):
+            log.warning("[%s] %s: %s", repo, name, res)
+            errors.append(f"{name}: {res}")
+        else:
+            data[name] = res
+
+    if "views" in data:
+        rep.views, rep.view_uniques = store.save_traffic(repo, "views", data["views"])
+    if "clones" in data:
+        rep.clones, _ = store.save_traffic(repo, "clones", data["clones"])
+    if "referrers" in data:
+        rep.referrers = data["referrers"]
+        rep.new_referrers = store.new_referrers(repo, [r["name"] for r in data["referrers"]])
+    rep.paths = data.get("paths", [])
+    if "stars" in data:
+        rep.stars_added, rep.stars_removed = store.sync_members("star", repo, data["stars"])
+    if "forks" in data:
+        rep.forks_added, _ = store.sync_members("fork", repo, data["forks"])
+    if "watchers" in data:
+        rep.watchers_added, _ = store.sync_members("watch", repo, data["watchers"])
+    if "issues" in data:
+        rep.new_issues = store.new_issues(repo, data["issues"])
+    if errors:
+        rep.error = "; ".join(e[:150] for e in errors)
     return rep
 
 

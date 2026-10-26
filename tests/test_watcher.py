@@ -20,9 +20,20 @@ class FakeGitHub:
         self.stars = {"bot": ["alice"]}
         self.followers = ["fan"]
         self.broken = set()  # репо, на которых API отвечает 500
+        self.token_lacks_star_rights = False  # как у реального fine-grained токена
+        self.public_calls = 0
+
+    def public_handler(self, req: httpx.Request) -> httpx.Response:
+        self.public_calls += 1
+        return self._route(req.url.path)
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         p = req.url.path
+        if self.token_lacks_star_rights and (p.endswith("/stargazers") or p.endswith("/subscribers")):
+            return httpx.Response(403, json={"message": "Resource not accessible by personal access token"})
+        return self._route(p)
+
+    def _route(self, p: str) -> httpx.Response:
         if p == "/user/repos":
             return httpx.Response(200, json=self.repos)
         if p == f"/users/{USER}/followers":
@@ -45,11 +56,17 @@ class FakeGitHub:
         return httpx.Response(404)
 
 
+def make_gh(fake: FakeGitHub) -> GitHub:
+    client = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(fake.handler))
+    public = httpx.AsyncClient(base_url="https://api.github.com",
+                               transport=httpx.MockTransport(fake.public_handler))
+    return GitHub("t", USER, client=client, public_client=public)
+
+
 @pytest.fixture
 def env():
     fake = FakeGitHub()
-    client = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(fake.handler))
-    return fake, GitHub("t", USER, client=client), Store(":memory:")
+    return fake, make_gh(fake), Store(":memory:")
 
 
 async def test_first_run_is_silent(env):
@@ -113,3 +130,27 @@ async def test_one_broken_repo_does_not_break_others(env):
     by_name = {r.repo: r for r in res.repos}
     assert by_name["broken"].error and "500" in by_name["broken"].error
     assert by_name["bot"].error is None
+
+
+async def test_fallback_to_public_api_when_token_lacks_rights(env):
+    fake, gh, store = env
+    fake.token_lacks_star_rights = True
+    await run_cycle(gh, store, False)
+    fake.stars["bot"].append("recruiter")
+    res = await run_cycle(gh, store, False)
+    assert res.repos[0].error is None
+    assert res.repos[0].stars_added == ["recruiter"]
+    assert fake.public_calls > 0
+
+
+async def test_failed_endpoint_does_not_lose_other_data(env):
+    fake, gh, store = env
+    await run_cycle(gh, store, False)
+    fake.views["bot"][0]["count"] = 9
+    fake.stars["bot"].append("recruiter")
+    fake.refs["bot"] = None  # сломанный ответ источников
+    res = await run_cycle(gh, store, False)
+    bot = res.repos[0]
+    assert bot.error and "referrers" in bot.error
+    assert bot.views == 7                     # просмотры всё равно посчитаны
+    assert bot.stars_added == ["recruiter"]   # и звёзды тоже
