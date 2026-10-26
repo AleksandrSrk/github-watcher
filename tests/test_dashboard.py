@@ -69,3 +69,13 @@ async def test_baseline_does_not_create_events(env):
     fake, gh, store = env
     await run_cycle(gh, store, False)
     assert store.events() == []
+
+
+async def test_overview_hides_empty_views_and_clones(env):
+    fake, gh, store = env
+    fake.repos.append({"name": "quiet", "fork": False, "private": False})
+    await run_cycle(gh, store, False)
+    text, _ = overview(USER, store, seen_at="")
+    quiet_line = next(line for line in text.splitlines() if ">quiet<" in line)
+    assert "—" not in quiet_line and "👁" not in quiet_line
+    assert "📥" not in text           # клоны только в карточке репо

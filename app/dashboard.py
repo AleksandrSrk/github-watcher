@@ -34,24 +34,22 @@ def overview(user: str, store: Store, seen_at: str) -> tuple[str, InlineKeyboard
     """Сводка по всем репо. seen_at — когда отчёт открывали прошлый раз: всё новее помечаем 🆕."""
     repos = tracked_repos(store)
     views = store.traffic_totals(DAYS, "views")
-    clones = store.traffic_totals(DAYS, "clones")
     stars = store.counters("star")
     forks = store.member_counts("fork")
     fresh = store.repos_with_events_since(seen_at) if seen_at else set()
     repos.sort(key=lambda r: (-views.get(r, (0, 0))[0], -stars.get(r, 0), r.lower()))
 
-    lines = [f"<b>📊 Отчёт за {DAYS} дней</b>  (👁 просмотры/уник. · 📥 клоны · ⭐ · 🍴)", ""]
+    # Клоны в сводку не выводим: это в основном боты и деплои, они есть в карточке репо.
+    lines = [f"<b>📊 Отчёт за {DAYS} дней</b>  (👁 просмотры/уник. · ⭐ звёзды · 🍴 форки)", ""]
     for r in repos:
         v, vu = views.get(r, (0, 0))
-        parts = [f"👁 {v}/{vu}" if v else "👁 —"]
-        if clones.get(r):
-            parts.append(f"📥 {clones[r][0]}")
+        parts = [f"👁 {v}/{vu}"] if v else []
         if stars.get(r):
             parts.append(f"⭐ {stars[r]}")
         if forks.get(r):
             parts.append(f"🍴 {forks[r]}")
         mark = "🆕 " if r in fresh else ""
-        lines.append(f"{mark}{_repo(user, r)} — {' · '.join(parts)}")
+        lines.append(f"{mark}{_repo(user, r)}" + (f" — {' · '.join(parts)}" if parts else ""))
     total = sum(v for v, _ in views.values())
     lines += ["", f"Всего просмотров: {total}, подписчиков профиля: {len(store.members('follower'))}"]
 
