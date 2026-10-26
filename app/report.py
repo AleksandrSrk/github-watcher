@@ -37,7 +37,8 @@ def _by_repo(pairs: list[tuple[str, str]]) -> dict[str, list[str]]:
 
 def build_report(title: str, user: str, days: int, store: Store, last: CycleResult | None,
                  only_new: bool = False) -> list[str]:
-    """only_new=True — недельный режим: звёзды/форки/подписки показываем только появившиеся за период."""
+    """only_new=True — недельный режим: форки и подписчики — только появившиеся за период,
+    по звёздам — изменение за период (кто ставит звёзды, GitHub не сообщает)."""
     since = None
     if only_new:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
@@ -45,10 +46,15 @@ def build_report(title: str, user: str, days: int, store: Store, last: CycleResu
         since = max(since, store.get_meta("baseline_at", ""))
     views = store.traffic_totals(days, "views")
     clones = store.traffic_totals(days, "clones")
-    stars = _by_repo(store.members("star", since))
     forks = _by_repo(store.members("fork", since))
-    watch = _by_repo(store.members("watch", since))
-    star_total = store.member_counts("star")
+    star_total = store.counters("star")
+    watch_total = store.counters("watch")
+    # за период: события звёзд/подписок из журнала (в стартовом отчёте их нет — только итоги)
+    period_events: dict[str, list[str]] = {}
+    if only_new:
+        for e in store.events(since=since, limit=1000):
+            if e["kind"] in ("star", "watch"):
+                period_events.setdefault(e["repo"], []).append(e["text"])
     snap = {r.repo: r for r in last.repos} if last else {}
 
     repos = sorted(set(snap) | set(views) | set(clones),
@@ -82,9 +88,17 @@ def build_report(title: str, user: str, days: int, store: Store, last: CycleResu
                 for x in r.referrers[:5]))
         if r and r.paths:
             lines.append("📄 " + ", ".join(f"{escape(_page(x['name']))} ({x['count']})" for x in r.paths[:3]))
-        for icon, names in (("⭐", stars.get(repo)), ("🍴", forks.get(repo)), ("👀", watch.get(repo))):
-            if names:
-                lines.append(f"{icon} " + ", ".join(_user(n) for n in names[:10]))
+        counts = []
+        if star_total.get(repo):
+            counts.append(f"⭐ {star_total[repo]}")
+        if watch_total.get(repo):
+            counts.append(f"👀 {watch_total[repo]}")
+        if counts and (v or c or not only_new):
+            lines.append(" · ".join(counts))
+        for text in reversed(period_events.get(repo, [])):
+            lines.append(f"🆕 {escape(text)}")
+        if forks.get(repo):
+            lines.append("🍴 " + ", ".join(_user(n) for n in forks[repo][:10]))
         if len(lines) == 1:
             quiet.append(escape(repo))
         else:

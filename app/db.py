@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS members (
     active     INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (kind, repo, login)
 );
+-- счётчики, где GitHub не отдаёт имён: звёзды и подписчики репо
+CREATE TABLE IF NOT EXISTS counters (
+    repo  TEXT NOT NULL,
+    kind  TEXT NOT NULL,          -- star | watch
+    value INTEGER NOT NULL,
+    PRIMARY KEY (repo, kind)
+);
 -- журнал всего нового: показываем в отчётах с датами
 CREATE TABLE IF NOT EXISTS events (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,6 +217,22 @@ class Store:
         rows = self.db.execute(
             "SELECT repo, COUNT(*) AS n FROM members WHERE kind=? AND active=1 GROUP BY repo", (kind,))
         return {r["repo"]: r["n"] for r in rows}
+
+    # --- счётчики звёзд и подписчиков ---------------------------------------
+    def update_counter(self, repo: str, kind: str, value: int) -> int:
+        """Сохраняет значение, возвращает изменение с прошлого прохода (первый проход — 0)."""
+        old = self.db.execute("SELECT value FROM counters WHERE repo=? AND kind=?", (repo, kind)).fetchone()
+        with self.db:
+            self.db.execute(
+                "INSERT INTO counters(repo, kind, value) VALUES(?, ?, ?) "
+                "ON CONFLICT(repo, kind) DO UPDATE SET value=excluded.value",
+                (repo, kind, value),
+            )
+        return value - old["value"] if old else 0
+
+    def counters(self, kind: str) -> dict[str, int]:
+        rows = self.db.execute("SELECT repo, value FROM counters WHERE kind=? AND value>0", (kind,))
+        return {r["repo"]: r["value"] for r in rows}
 
     # --- чужие issues / PR ---------------------------------------------------
     def new_issues(self, repo: str, items: list[dict]) -> list[dict]:

@@ -22,10 +22,11 @@ class RepoReport:
     referrers: list[dict] = field(default_factory=list)   # текущий топ источников
     paths: list[dict] = field(default_factory=list)       # какие страницы открывали
     new_referrers: list[str] = field(default_factory=list)
-    stars_added: list[str] = field(default_factory=list)
-    stars_removed: list[str] = field(default_factory=list)
+    stars: int = 0            # сейчас всего (кто именно — GitHub не сообщает)
+    stars_delta: int = 0      # изменение с прошлого прохода
+    watchers: int = 0
+    watchers_delta: int = 0
     forks_added: list[str] = field(default_factory=list)
-    watchers_added: list[str] = field(default_factory=list)
     new_issues: list[dict] = field(default_factory=list)
     error: str | None = None
 
@@ -33,8 +34,8 @@ class RepoReport:
     def has_news(self) -> bool:
         """Есть ли что-то, ради чего стоит писать в Telegram. Клоны не считаем — там в основном боты."""
         return bool(
-            self.views or self.new_referrers or self.stars_added or self.stars_removed
-            or self.forks_added or self.watchers_added or self.new_issues
+            self.views or self.new_referrers or self.stars_delta or self.watchers_delta
+            or self.forks_added or self.new_issues
         )
 
 
@@ -51,15 +52,14 @@ class CycleResult:
 async def check_repo(gh: GitHub, store: Store, repo: str) -> RepoReport:
     """Каждый источник обрабатывается отдельно: сбой одного запроса не теряет остальные данные."""
     rep = RepoReport(repo)
-    names = ("views", "clones", "referrers", "paths", "stars", "forks", "watchers", "issues")
+    names = ("views", "clones", "referrers", "paths", "counters", "forks", "issues")
     results = await asyncio.gather(
         gh.traffic(repo, "views"),
         gh.traffic(repo, "clones"),
         gh.referrers(repo),
         gh.paths(repo),
-        gh.stargazers(repo),
+        gh.counters(repo),
         gh.forks(repo),
-        gh.watchers(repo),
         gh.foreign_issues(repo),
         return_exceptions=True,
     )
@@ -79,12 +79,13 @@ async def check_repo(gh: GitHub, store: Store, repo: str) -> RepoReport:
         rep.referrers = data["referrers"]
         rep.new_referrers = store.new_referrers(repo, [r["name"] for r in data["referrers"]])
     rep.paths = data.get("paths", [])
-    if "stars" in data:
-        rep.stars_added, rep.stars_removed = store.sync_members("star", repo, data["stars"])
+    if "counters" in data:
+        rep.stars = data["counters"]["star"]
+        rep.stars_delta = store.update_counter(repo, "star", rep.stars)
+        rep.watchers = data["counters"]["watch"]
+        rep.watchers_delta = store.update_counter(repo, "watch", rep.watchers)
     if "forks" in data:
         rep.forks_added, _ = store.sync_members("fork", repo, data["forks"])
-    if "watchers" in data:
-        rep.watchers_added, _ = store.sync_members("watch", repo, data["watchers"])
     if "issues" in data:
         rep.new_issues = store.new_issues(repo, data["issues"])
     if errors:
@@ -122,6 +123,10 @@ async def run_cycle(gh: GitHub, store: Store, include_private: bool) -> CycleRes
     return result
 
 
+def signed(n: int) -> str:
+    return f"+{n}" if n > 0 else f"−{-n}"
+
+
 def record_events(store: Store, res: CycleResult):
     """Всё новое из прохода — в журнал, чтобы потом показывать в отчётах с датами."""
     for name in res.repos_added:
@@ -133,14 +138,12 @@ def record_events(store: Store, res: CycleResult):
             store.add_event(r.repo, "views", f"+{r.views} просмотров ({r.view_uniques} уник.)")
         for src in r.new_referrers:
             store.add_event(r.repo, "referrer", f"новый источник: {src}")
-        for login in r.stars_added:
-            store.add_event(r.repo, "star", f"звезда от {login}")
-        for login in r.stars_removed:
-            store.add_event(r.repo, "unstar", f"{login} убрал звезду")
+        if r.stars_delta:
+            store.add_event(r.repo, "star", f"{signed(r.stars_delta)} звезда (всего {r.stars})")
+        if r.watchers_delta:
+            store.add_event(r.repo, "watch", f"{signed(r.watchers_delta)} подписчик репо (всего {r.watchers})")
         for login in r.forks_added:
             store.add_event(r.repo, "fork", f"форк от {login}")
-        for login in r.watchers_added:
-            store.add_event(r.repo, "watch", f"{login} подписался на репо")
         for it in r.new_issues:
             kind = "PR" if it["is_pr"] else "issue"
             store.add_event(r.repo, "issue", f"{kind} #{it['number']} от {it['author']}: {it['title'][:80]}")

@@ -35,7 +35,7 @@ def overview(user: str, store: Store, seen_at: str) -> tuple[str, InlineKeyboard
     repos = tracked_repos(store)
     views = store.traffic_totals(DAYS, "views")
     clones = store.traffic_totals(DAYS, "clones")
-    stars = store.member_counts("star")
+    stars = store.counters("star")
     forks = store.member_counts("fork")
     fresh = store.repos_with_events_since(seen_at) if seen_at else set()
     repos.sort(key=lambda r: (-views.get(r, (0, 0))[0], -stars.get(r, 0), r.lower()))
@@ -102,10 +102,14 @@ def repo_detail(user: str, store: Store, repo: str, last: CycleResult | None) ->
         lines += ["", "<b>Что открывали</b> (14 дн.):"]
         lines += [f"• {escape(_page(x['name']))} — {x['count']}" for x in snap.paths[:5]]
 
-    for icon, kind, title in (("⭐", "star", "Звёзды"), ("🍴", "fork", "Форки"), ("👀", "watch", "Подписаны")):
-        people = _members_of(store, kind, repo)
-        if people:
-            lines += ["", f"<b>{icon} {title}:</b> " + ", ".join(_user(p) for p in people)]
+    stars = store.counters("star").get(repo, 0)
+    watch = store.counters("watch").get(repo, 0)
+    if stars or watch:
+        lines += ["", f"⭐ звёзд: {stars} · 👀 подписчиков репо: {watch}",
+                  "<i>кто именно — GitHub не сообщает, поэтому только количество</i>"]
+    forks = _members_of(store, "fork", repo)
+    if forks:
+        lines += ["", "<b>🍴 Форки:</b> " + ", ".join(_user(p) for p in forks)]
 
     evs = store.events(repo=repo, limit=15)
     if evs:

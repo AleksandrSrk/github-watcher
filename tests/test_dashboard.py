@@ -34,13 +34,13 @@ async def test_new_events_are_marked_and_listed(env):
     time.sleep(1.1)
     seen = now()
     time.sleep(1.1)
-    fake.stars["bot"].append("recruiter")
+    fake.stars["bot"] = 2
     fake.refs["bot"].append({"referrer": "hh.ru", "count": 1, "uniques": 1})
     await run_cycle(gh, store, False)
 
     text, kb = overview(USER, store, seen_at=seen)
     assert "🆕" in text
-    assert "звезда от recruiter" in text and "новый источник: hh.ru" in text
+    assert "+1 звезда (всего 2)" in text and "новый источник: hh.ru" in text
     assert any(b.text == "🆕 bot" for row in kb.inline_keyboard for b in row)
 
     # открыли отчёт — при следующем просмотре старое уже не «новое»
@@ -53,13 +53,14 @@ async def test_repo_detail_has_days_people_and_events(env):
     await run_cycle(gh, store, False)
     fake.views["bot"].append({"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z"),
                               "count": 4, "uniques": 3})
-    fake.stars["bot"].append("recruiter")
+    fake.stars["bot"] = 2
+    fake.forks["bot"] = ["copycat"]
     res = await run_cycle(gh, store, False)
 
     text, kb = repo_detail(USER, store, "bot", res)
     assert "По дням" in text and "👁 4 (3 уник.)" in text
-    assert "recruiter" in text and "alice" in text        # все звёзды в карточке
-    assert "События" in text and "звезда от recruiter" in text
+    assert "⭐ звёзд: 2" in text and "copycat" in text
+    assert "События" in text and "+1 звезда (всего 2)" in text
     assert "Google" in text                                 # источники
     assert kb.inline_keyboard[0][0].callback_data == "overview"
 

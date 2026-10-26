@@ -1,7 +1,7 @@
 """Тексты сообщений в Telegram (HTML-разметка)."""
 from html import escape
 
-from .watcher import CycleResult, RepoReport
+from .watcher import CycleResult, RepoReport, signed
 
 GH = "https://github.com"
 
@@ -32,14 +32,12 @@ def format_repo(user: str, r: RepoReport) -> str:
     if r.views and r.referrers:
         top = ", ".join(f"{escape(x['name'])} ({x['count']})" for x in r.referrers[:5])
         lines.append(f"↪️ откуда (14 дн.): {top}")
-    for login in r.stars_added:
-        lines.append(f"⭐ звезда от {_user(login)}")
-    for login in r.stars_removed:
-        lines.append(f"💔 {_user(login)} убрал звезду")
+    if r.stars_delta:
+        lines.append(f"{'⭐' if r.stars_delta > 0 else '💔'} {signed(r.stars_delta)} звезда, всего {r.stars}")
+    if r.watchers_delta:
+        lines.append(f"👀 {signed(r.watchers_delta)} подписчик репо, всего {r.watchers}")
     for login in r.forks_added:
         lines.append(f"🍴 форк от {_user(login)}")
-    for login in r.watchers_added:
-        lines.append(f"👀 {_user(login)} подписался на репо")
     for it in r.new_issues:
         kind = "PR" if it["is_pr"] else "issue"
         lines.append(f'💬 {kind} от {_user(it["author"])}: <a href="{escape(it["url"])}">'

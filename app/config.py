@@ -7,7 +7,6 @@ from dataclasses import dataclass
 class Settings:
     github_token: str
     github_user: str
-    github_public_token: str  # classic без прав: звёзды/подписчики/форки (fine-grained туда не пускают)
     tg_token: str
     tg_admin: int
     poll_interval: int        # секунды между проходами
@@ -30,7 +29,6 @@ def load_settings(env=os.environ) -> Settings:
     return Settings(
         github_token=token,
         github_user=user,
-        github_public_token=env.get("GITHUB_PUBLIC_TOKEN", "").strip(),
         tg_token=tg_token,
         tg_admin=int(env.get("TG_ADMIN_ID", "0") or 0),
         poll_interval=int(env.get("POLL_INTERVAL", "3600")),

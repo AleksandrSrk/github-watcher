@@ -11,36 +11,34 @@ USER = "me"
 
 
 class FakeGitHub:
-    """Состояние «GitHub», которое тесты меняют между проходами."""
+    """Состояние «GitHub», которое тесты меняют между проходами. Ведёт себя как реальный:
+    списки звёзд и подписчиков не отдаёт (403), только их количество в карточке репо."""
 
     def __init__(self):
         self.repos = [{"name": "bot", "fork": False, "private": False}]
         self.views = {"bot": [{"timestamp": "2026-10-20T00:00:00Z", "count": 2, "uniques": 1}]}
         self.refs = {"bot": [{"referrer": "Google", "count": 2, "uniques": 1}]}
-        self.stars = {"bot": ["alice"]}
+        self.stars = {"bot": 1}
+        self.watchers = {"bot": 1}
+        self.forks = {"bot": []}
         self.followers = ["fan"]
         self.broken = set()  # репо, на которых API отвечает 500
-        self.token_lacks_star_rights = False  # как у реального fine-grained токена
-        self.public_calls = 0
-
-    def public_handler(self, req: httpx.Request) -> httpx.Response:
-        self.public_calls += 1
-        return self._route(req.url.path)
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         p = req.url.path
-        if self.token_lacks_star_rights and (p.endswith("/stargazers") or p.endswith("/subscribers")):
-            return httpx.Response(403, json={"message": "Resource not accessible by personal access token"})
-        return self._route(p)
-
-    def _route(self, p: str) -> httpx.Response:
         if p == "/user/repos":
             return httpx.Response(200, json=self.repos)
         if p == f"/users/{USER}/followers":
             return httpx.Response(200, json=[{"login": x} for x in self.followers])
-        repo = p.split("/")[3]
+        parts = p.split("/")
+        repo = parts[3]
         if repo in self.broken:
             return httpx.Response(500, text="boom")
+        if len(parts) == 4:  # /repos/me/<repo>
+            return httpx.Response(200, json={"name": repo, "stargazers_count": self.stars.get(repo, 0),
+                                             "subscribers_count": self.watchers.get(repo, 0)})
+        if p.endswith("/stargazers") or p.endswith("/subscribers"):
+            return httpx.Response(403, json={"message": "Resource not accessible by personal access token"})
         if p.endswith("/traffic/views"):
             return httpx.Response(200, json={"views": self.views.get(repo, [])})
         if p.endswith("/traffic/clones"):
@@ -49,18 +47,16 @@ class FakeGitHub:
             return httpx.Response(200, json=[{"path": f"/{USER}/{repo}", "title": repo, "count": 2, "uniques": 1}])
         if p.endswith("/popular/referrers"):
             return httpx.Response(200, json=self.refs.get(repo, []))
-        if p.endswith("/stargazers"):
-            return httpx.Response(200, json=[{"login": x} for x in self.stars.get(repo, [])])
-        if p.endswith("/forks") or p.endswith("/subscribers") or p.endswith("/issues"):
+        if p.endswith("/forks"):
+            return httpx.Response(200, json=[{"owner": {"login": x}} for x in self.forks.get(repo, [])])
+        if p.endswith("/issues"):
             return httpx.Response(200, json=[])
         return httpx.Response(404)
 
 
 def make_gh(fake: FakeGitHub) -> GitHub:
     client = httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(fake.handler))
-    public = httpx.AsyncClient(base_url="https://api.github.com",
-                               transport=httpx.MockTransport(fake.public_handler))
-    return GitHub("t", USER, client=client, public_client=public)
+    return GitHub("t", USER, client=client)
 
 
 @pytest.fixture
@@ -73,6 +69,7 @@ async def test_first_run_is_silent(env):
     fake, gh, store = env
     res = await run_cycle(gh, store, include_private=False)
     assert format_cycle(USER, res) == []
+    assert res.repos[0].error is None
 
 
 async def test_changes_are_reported(env):
@@ -81,18 +78,29 @@ async def test_changes_are_reported(env):
     fake.views["bot"][0]["count"] = 5
     fake.views["bot"][0]["uniques"] = 2
     fake.refs["bot"].append({"referrer": "hh.ru", "count": 3, "uniques": 1})
-    fake.stars["bot"].append("recruiter")
+    fake.stars["bot"] = 2
+    fake.forks["bot"] = ["copycat"]
     fake.followers.append("newfan")
 
     res = await run_cycle(gh, store, False)
     bot = res.repos[0]
     assert (bot.views, bot.view_uniques) == (3, 1)
     assert bot.new_referrers == ["hh.ru"]
-    assert bot.stars_added == ["recruiter"]
+    assert (bot.stars, bot.stars_delta) == (2, 1)
+    assert bot.forks_added == ["copycat"]
     assert res.followers_added == ["newfan"]
     text = "\n".join(format_cycle(USER, res))
     assert "🔥 новый источник: <b>hh.ru</b>" in text
-    assert "recruiter" in text and "newfan" in text
+    assert "⭐ +1 звезда, всего 2" in text
+    assert "copycat" in text and "newfan" in text
+
+
+async def test_unstar_is_reported(env):
+    fake, gh, store = env
+    await run_cycle(gh, store, False)
+    fake.stars["bot"] = 0
+    res = await run_cycle(gh, store, False)
+    assert "💔 −1 звезда, всего 0" in "\n".join(format_cycle(USER, res))
 
 
 async def test_new_repo_is_picked_up_and_announced(env):
@@ -132,25 +140,14 @@ async def test_one_broken_repo_does_not_break_others(env):
     assert by_name["bot"].error is None
 
 
-async def test_fallback_to_public_api_when_token_lacks_rights(env):
-    fake, gh, store = env
-    fake.token_lacks_star_rights = True
-    await run_cycle(gh, store, False)
-    fake.stars["bot"].append("recruiter")
-    res = await run_cycle(gh, store, False)
-    assert res.repos[0].error is None
-    assert res.repos[0].stars_added == ["recruiter"]
-    assert fake.public_calls > 0
-
-
 async def test_failed_endpoint_does_not_lose_other_data(env):
     fake, gh, store = env
     await run_cycle(gh, store, False)
     fake.views["bot"][0]["count"] = 9
-    fake.stars["bot"].append("recruiter")
+    fake.stars["bot"] = 3
     fake.refs["bot"] = None  # сломанный ответ источников
     res = await run_cycle(gh, store, False)
     bot = res.repos[0]
     assert bot.error and "referrers" in bot.error
-    assert bot.views == 7                     # просмотры всё равно посчитаны
-    assert bot.stars_added == ["recruiter"]   # и звёзды тоже
+    assert bot.views == 7            # просмотры всё равно посчитаны
+    assert bot.stars_delta == 2      # и звёзды тоже

@@ -46,8 +46,7 @@ class App:
     def __init__(self, settings: Settings):
         self.s = settings
         self.store = Store(settings.db_path)
-        self.gh = GitHub(settings.github_token, settings.github_user,
-                         public_token=settings.github_public_token)
+        self.gh = GitHub(settings.github_token, settings.github_user)
         self.bot = Bot(settings.tg_token, default=DefaultBotProperties(
             parse_mode="HTML", link_preview_is_disabled=True))
         self.lock = asyncio.Lock()  # проход и ручная /check не должны идти одновременно
@@ -123,7 +122,7 @@ class App:
 
     def week_text(self) -> str:
         return format_totals("📊 Просмотры за 7 дней", self.store.traffic_totals(7),
-                             self.store.member_counts("star"))
+                             self.store.counters("star"))
 
     async def loop(self):
         while True:
@@ -200,7 +199,7 @@ def build_router(app: App) -> Router:
         days = int(command.args) if command.args and command.args.isdigit() else 30
         days = max(1, min(days, 3650))
         await m.answer(format_totals(f"📊 Просмотры за {days} дн.", app.store.traffic_totals(days),
-                                     app.store.member_counts("star")))
+                                     app.store.counters("star")))
 
     @r.message(Command("week"))
     async def week(m: Message):

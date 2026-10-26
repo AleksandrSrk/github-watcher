@@ -104,3 +104,15 @@ class TestEventsAndDays:
         rows = store.traffic_by_day("r", 14, until=date(2026, 10, 20))
         assert rows[0] == {"day": "2026-10-20", "views": 5, "view_uniq": 2, "clones": 7, "clone_uniq": 3}
         assert rows[1]["day"] == "2026-10-19" and rows[1]["views"] == 0
+
+
+class TestCounters:
+    def test_first_value_is_silent_then_delta(self, store):
+        assert store.update_counter("r", "star", 3) == 0
+        assert store.update_counter("r", "star", 5) == 2
+        assert store.update_counter("r", "star", 4) == -1
+        assert store.counters("star") == {"r": 4}
+
+    def test_zero_not_listed(self, store):
+        store.update_counter("r", "star", 0)
+        assert store.counters("star") == {}

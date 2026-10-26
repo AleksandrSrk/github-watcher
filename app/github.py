@@ -6,11 +6,6 @@ import httpx
 API = "https://api.github.com"
 log = logging.getLogger("github")
 
-
-class GitHubError(Exception):
-    pass
-
-
 HEADERS = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
@@ -18,48 +13,36 @@ HEADERS = {
 }
 
 
+class GitHubError(Exception):
+    pass
+
+
 class GitHub:
-    def __init__(self, token: str, user: str, client: httpx.AsyncClient | None = None,
-                 public_client: httpx.AsyncClient | None = None, public_token: str = ""):
+    def __init__(self, token: str, user: str, client: httpx.AsyncClient | None = None):
         self.user = user
         self._client = client or httpx.AsyncClient(
             base_url=API, timeout=30, headers={**HEADERS, "Authorization": f"Bearer {token}"})
-        # Fine-grained токен не пускает к спискам звёзд и подписчиков репо (403), а без
-        # авторизации GitHub их не отдаёт (401). Поэтому для них — classic-токен без прав:
-        # менять он ничего не может, но считается авторизацией.
-        public_headers = {**HEADERS, "Authorization": f"Bearer {public_token}"} if public_token else HEADERS
-        self._public = public_client or httpx.AsyncClient(base_url=API, timeout=30, headers=public_headers)
 
     async def close(self):
         await self._client.aclose()
-        await self._public.aclose()
 
-    async def _get(self, path: str, params: dict | None = None, public: bool = False):
-        r = await (self._public if public else self._client).get(path, params=params)
+    async def _get(self, path: str, params: dict | None = None):
+        r = await self._client.get(path, params=params)
         if r.status_code == 403 and r.headers.get("x-ratelimit-remaining") == "0":
-            raise GitHubError("исчерпан лимит запросов GitHub API" + (" (без токена)" if public else ""))
+            raise GitHubError("исчерпан лимит запросов GitHub API")
         if r.status_code >= 400:
             raise GitHubError(f"{path}: HTTP {r.status_code} {r.text[:200]}")
         return r
 
-    async def _paged(self, path: str, params: dict | None = None, public: bool = False) -> list:
+    async def _paged(self, path: str, params: dict | None = None) -> list:
         """Собирает все страницы по заголовку Link."""
         items, url, p = [], path, {"per_page": 100, **(params or {})}
         while url:
-            r = await self._get(url, params=p, public=public)
+            r = await self._get(url, params=p)
             items.extend(r.json())
             url = r.links.get("next", {}).get("url")
             p = None  # в next-ссылке параметры уже есть
         return items
-
-    async def _paged_public_fallback(self, path: str) -> list:
-        """Сначала основным токеном; если ему не хватает прав (403) — classic-токеном без прав."""
-        try:
-            return await self._paged(path)
-        except GitHubError as e:
-            if "HTTP 403" not in str(e):
-                raise
-            return await self._paged(path, public=True)
 
     # --- репозитории ---------------------------------------------------------
     async def repos(self, include_private: bool) -> list[str]:
@@ -68,6 +51,16 @@ class GitHub:
             r["name"] for r in data
             if not r["fork"] and (include_private or not r["private"])
         )
+
+    async def counters(self, repo: str) -> dict[str, int]:
+        """Количество звёзд и подписчиков репо.
+
+        Кто именно поставил звезду или подписался, GitHub не отдаёт никому, даже владельцу:
+        REST отвечает 403/404, а GraphQL возвращает пустой список при ненулевом счётчике.
+        Поэтому следим за количеством.
+        """
+        r = (await self._get(f"/repos/{self.user}/{repo}")).json()
+        return {"star": r.get("stargazers_count", 0), "watch": r.get("subscribers_count", 0)}
 
     # --- трафик (хранится на GitHub только 14 дней) ---------------------------
     async def traffic(self, repo: str, kind: str) -> list[dict]:
@@ -87,20 +80,12 @@ class GitHub:
         return [{"name": x["path"], "count": x["count"], "uniques": x["uniques"]} for x in r.json()]
 
     # --- люди ----------------------------------------------------------------
-    async def stargazers(self, repo: str) -> set[str]:
-        data = await self._paged_public_fallback(f"/repos/{self.user}/{repo}/stargazers")
-        return {x["login"] for x in data}
-
     async def forks(self, repo: str) -> set[str]:
-        data = await self._paged_public_fallback(f"/repos/{self.user}/{repo}/forks")
+        data = await self._paged(f"/repos/{self.user}/{repo}/forks")
         return {x["owner"]["login"] for x in data}
 
-    async def watchers(self, repo: str) -> set[str]:
-        data = await self._paged_public_fallback(f"/repos/{self.user}/{repo}/subscribers")
-        return {x["login"] for x in data} - {self.user}
-
     async def followers(self) -> set[str]:
-        data = await self._paged_public_fallback(f"/users/{self.user}/followers")
+        data = await self._paged(f"/users/{self.user}/followers")
         return {x["login"] for x in data}
 
     async def foreign_issues(self, repo: str) -> list[dict]:
