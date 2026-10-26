@@ -20,13 +20,15 @@ HEADERS = {
 
 class GitHub:
     def __init__(self, token: str, user: str, client: httpx.AsyncClient | None = None,
-                 public_client: httpx.AsyncClient | None = None):
+                 public_client: httpx.AsyncClient | None = None, public_token: str = ""):
         self.user = user
         self._client = client or httpx.AsyncClient(
             base_url=API, timeout=30, headers={**HEADERS, "Authorization": f"Bearer {token}"})
-        # Без токена: fine-grained токен не пускает к спискам звёзд и подписчиков (403),
-        # а для публичных репо эти данные открыты всем. Лимит — 60 запросов в час.
-        self._public = public_client or httpx.AsyncClient(base_url=API, timeout=30, headers=HEADERS)
+        # Fine-grained токен не пускает к спискам звёзд и подписчиков репо (403), а без
+        # авторизации GitHub их не отдаёт (401). Поэтому для них — classic-токен без прав:
+        # менять он ничего не может, но считается авторизацией.
+        public_headers = {**HEADERS, "Authorization": f"Bearer {public_token}"} if public_token else HEADERS
+        self._public = public_client or httpx.AsyncClient(base_url=API, timeout=30, headers=public_headers)
 
     async def close(self):
         await self._client.aclose()
@@ -51,7 +53,7 @@ class GitHub:
         return items
 
     async def _paged_public_fallback(self, path: str) -> list:
-        """Сначала с токеном; если токену не хватает прав (403) — публичный запрос без токена."""
+        """Сначала основным токеном; если ему не хватает прав (403) — classic-токеном без прав."""
         try:
             return await self._paged(path)
         except GitHubError as e:

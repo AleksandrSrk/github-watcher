@@ -116,6 +116,35 @@ async def run_cycle(gh: GitHub, store: Store, include_private: bool) -> CycleRes
     except Exception as e:
         log.exception("ошибка при проверке подписчиков")
         result.error = str(e)
+    record_events(store, result)
     log.info("проход: репозиториев %d, с новостями %d",
              len(reports), sum(r.has_news for r in reports))
     return result
+
+
+def record_events(store: Store, res: CycleResult):
+    """Всё новое из прохода — в журнал, чтобы потом показывать в отчётах с датами."""
+    for name in res.repos_added:
+        store.add_event(name, "repo", "репозиторий взят под контроль")
+    for name in res.repos_removed:
+        store.add_event(name, "repo", "убран из контроля (удалён или стал приватным)")
+    for r in res.repos:
+        if r.views:
+            store.add_event(r.repo, "views", f"+{r.views} просмотров ({r.view_uniques} уник.)")
+        for src in r.new_referrers:
+            store.add_event(r.repo, "referrer", f"новый источник: {src}")
+        for login in r.stars_added:
+            store.add_event(r.repo, "star", f"звезда от {login}")
+        for login in r.stars_removed:
+            store.add_event(r.repo, "unstar", f"{login} убрал звезду")
+        for login in r.forks_added:
+            store.add_event(r.repo, "fork", f"форк от {login}")
+        for login in r.watchers_added:
+            store.add_event(r.repo, "watch", f"{login} подписался на репо")
+        for it in r.new_issues:
+            kind = "PR" if it["is_pr"] else "issue"
+            store.add_event(r.repo, "issue", f"{kind} #{it['number']} от {it['author']}: {it['title'][:80]}")
+    for login in res.followers_added:
+        store.add_event("", "follower", f"новый подписчик профиля: {login}")
+    for login in res.followers_removed:
+        store.add_event("", "follower", f"отписался от профиля: {login}")

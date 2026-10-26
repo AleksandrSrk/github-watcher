@@ -88,3 +88,19 @@ class TestIssues:
         assert store.new_issues("r", []) == []
         assert store.new_issues("r", [it]) == [it]
         assert store.new_issues("r", [it]) == []
+
+
+class TestEventsAndDays:
+    def test_events_since_and_repo_filter(self, store):
+        store.add_event("a", "star", "x", ts="2026-10-20T10:00:00+00:00")
+        store.add_event("b", "fork", "y", ts="2026-10-21T10:00:00+00:00")
+        assert [e["text"] for e in store.events(since="2026-10-20T12:00:00+00:00")] == ["y"]
+        assert [e["text"] for e in store.events(repo="a")] == ["x"]
+        assert store.repos_with_events_since("2026-10-20T12:00:00+00:00") == {"b"}
+
+    def test_traffic_by_day_merges_views_and_clones(self, store):
+        store.save_traffic("r", "views", [day("2026-10-20", 5, 2)])
+        store.save_traffic("r", "clones", [day("2026-10-20", 7, 3), day("2026-10-19", 1, 1)])
+        rows = store.traffic_by_day("r", 14, until=date(2026, 10, 20))
+        assert rows[0] == {"day": "2026-10-20", "views": 5, "view_uniq": 2, "clones": 7, "clone_uniq": 3}
+        assert rows[1]["day"] == "2026-10-19" and rows[1]["views"] == 0

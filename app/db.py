@@ -33,6 +33,15 @@ CREATE TABLE IF NOT EXISTS members (
     active     INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (kind, repo, login)
 );
+-- журнал всего нового: показываем в отчётах с датами
+CREATE TABLE IF NOT EXISTS events (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts    TEXT NOT NULL,          -- UTC ISO
+    repo  TEXT NOT NULL,          -- '' — событие профиля
+    kind  TEXT NOT NULL,          -- views | referrer | star | unstar | fork | watch | issue | repo | follower ...
+    text  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_repo_ts ON events(repo, ts);
 CREATE TABLE IF NOT EXISTS issues (
     repo   TEXT NOT NULL,
     number INTEGER NOT NULL,
@@ -105,6 +114,45 @@ class Store:
             (kind, since, until.isoformat()),
         ).fetchall()
         return {r["repo"]: (r["c"], r["u"]) for r in rows}
+
+    def traffic_by_day(self, repo: str, days: int, until: date | None = None) -> list[dict]:
+        """[{day, views, view_uniq, clones, clone_uniq}] за последние days дней, новые сверху; пустые дни пропускаем."""
+        until = until or datetime.now(timezone.utc).date()
+        since = (until - timedelta(days=days - 1)).isoformat()
+        rows = self.db.execute(
+            "SELECT day, "
+            "SUM(CASE WHEN kind='views' THEN count END) AS v, SUM(CASE WHEN kind='views' THEN uniques END) AS vu, "
+            "SUM(CASE WHEN kind='clones' THEN count END) AS c, SUM(CASE WHEN kind='clones' THEN uniques END) AS cu "
+            "FROM traffic WHERE repo=? AND day>=? AND day<=? GROUP BY day ORDER BY day DESC",
+            (repo, since, until.isoformat()),
+        ).fetchall()
+        return [
+            {"day": r["day"], "views": r["v"] or 0, "view_uniq": r["vu"] or 0,
+             "clones": r["c"] or 0, "clone_uniq": r["cu"] or 0}
+            for r in rows if (r["v"] or 0) + (r["c"] or 0) > 0
+        ]
+
+    # --- журнал событий --------------------------------------------------------
+    def add_event(self, repo: str, kind: str, text: str, ts: str | None = None):
+        with self.db:
+            self.db.execute("INSERT INTO events(ts, repo, kind, text) VALUES(?, ?, ?, ?)",
+                            (ts or _now(), repo, kind, text))
+
+    def events(self, repo: str | None = None, since: str | None = None, limit: int = 30) -> list[dict]:
+        q, args = "SELECT ts, repo, kind, text FROM events WHERE 1=1", []
+        if repo is not None:
+            q += " AND repo=?"
+            args.append(repo)
+        if since:
+            q += " AND ts>?"
+            args.append(since)
+        q += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        return [dict(r) for r in self.db.execute(q, args)]
+
+    def repos_with_events_since(self, since: str) -> set[str]:
+        rows = self.db.execute("SELECT DISTINCT repo FROM events WHERE ts>?", (since,))
+        return {r["repo"] for r in rows}
 
     # --- источники переходов ---------------------------------------------------
     def new_referrers(self, repo: str, names: list[str]) -> list[str]:

@@ -10,9 +10,10 @@ from datetime import datetime, timezone
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup
 
 from .config import Settings, load_settings
+from .dashboard import REPORT_BUTTON, overview, repo_detail
 from .db import Store
 from .github import GitHub
 from .report import build_report
@@ -45,18 +46,19 @@ class App:
     def __init__(self, settings: Settings):
         self.s = settings
         self.store = Store(settings.db_path)
-        self.gh = GitHub(settings.github_token, settings.github_user)
+        self.gh = GitHub(settings.github_token, settings.github_user,
+                         public_token=settings.github_public_token)
         self.bot = Bot(settings.tg_token, default=DefaultBotProperties(
             parse_mode="HTML", link_preview_is_disabled=True))
         self.lock = asyncio.Lock()  # проход и ручная /check не должны идти одновременно
         self.last: CycleResult | None = None  # последний проход: текущие источники и страницы
 
-    async def send(self, text: str):
+    async def send(self, text: str, reply_markup=None):
         if not self.s.tg_admin:
             log.warning("TG_ADMIN_ID не задан, сообщение не отправлено")
             return
         try:
-            await self.bot.send_message(self.s.tg_admin, text[:4000])
+            await self.bot.send_message(self.s.tg_admin, text[:4000], reply_markup=reply_markup)
         except Exception:
             log.exception("не удалось отправить сообщение в Telegram")
 
@@ -67,11 +69,32 @@ class App:
         msgs = format_cycle(self.s.github_user, res)
         for m in msgs:
             await self.send(m)
-        if err := format_errors(res):
-            await self.send(err)
+        await self.report_errors(res)
         if report_empty and not msgs:
             await self.send(f"Проверил {len(res.repos)} репозиториев — нового ничего.")
         self.store.set_meta("last_cycle", datetime.now().strftime("%d.%m.%Y %H:%M"))
+
+    async def report_errors(self, res: CycleResult):
+        """Одна и та же ошибка приходит один раз, а не каждый час. Когда проходит — сообщаем."""
+        sig = "|".join(sorted(
+            [f"{r.repo}:{e.split(':')[0]}" for r in res.repos if r.error for e in r.error.split("; ")]
+            + (["general"] if res.error else [])))
+        prev = self.store.get_meta("errors_sig", "")
+        if sig == prev:
+            return
+        if sig:
+            if err := format_errors(res):
+                await self.send(err + "\n\nПока ошибки те же — повторно писать не буду.")
+        else:
+            await self.send("✅ Ошибки при опросе GitHub ушли, всё работает.")
+        self.store.set_meta("errors_sig", sig)
+
+    def current_report(self) -> tuple:
+        """Общий отчёт; запоминаем момент просмотра, чтобы в следующий раз отметить новое 🆕."""
+        seen = self.store.get_meta("seen_at", "")
+        text, kb = overview(self.s.github_user, self.store, seen)
+        self.store.set_meta("seen_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        return text, kb
 
     async def send_report(self, title: str, days: int, only_new: bool):
         for msg in build_report(title, self.s.github_user, days, self.store, self.last, only_new=only_new):
@@ -83,6 +106,8 @@ class App:
             return
         await self.send_report("🚀 Стартовый отчёт: вся доступная история (трафик — 14 дней, больше GitHub не хранит)",
                                14, only_new=False)
+        await self.send(f"Кнопка «{REPORT_BUTTON}» внизу — сводка по всем репо с разбивкой по дням.",
+                        reply_markup=MAIN_KB)
         self.store.set_meta("initial_report", datetime.now().isoformat(timespec="seconds"))
         self.store.set_meta("baseline_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
         # чтобы в эту же неделю не прилетел ещё и недельный отчёт
@@ -117,21 +142,53 @@ class App:
                 heartbeat(self.s.data_dir)
 
 
+MAIN_KB = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=REPORT_BUTTON)]], resize_keyboard=True,
+                              is_persistent=True)
+
+
 def build_router(app: App) -> Router:
     r = Router()
     # бот отвечает только владельцу, остальных молча игнорирует
     r.message.filter(F.from_user.id == app.s.tg_admin)
+    r.callback_query.filter(F.from_user.id == app.s.tg_admin)
+
+    @r.message(F.text == REPORT_BUTTON)
+    @r.message(Command("now"))
+    async def current(m: Message):
+        text, kb = app.current_report()
+        await m.answer(text, reply_markup=kb)
+
+    @r.callback_query(F.data == "overview")
+    async def cb_overview(c: CallbackQuery):
+        text, kb = app.current_report()
+        await _edit(c, text, kb)
+
+    @r.callback_query(F.data.startswith("repo:"))
+    async def cb_repo(c: CallbackQuery):
+        text, kb = repo_detail(app.s.github_user, app.store, c.data[5:], app.last)
+        await _edit(c, text, kb)
+
+    async def _edit(c: CallbackQuery, text: str, kb):
+        try:
+            await c.message.edit_text(text, reply_markup=kb)
+        except Exception as e:  # «message is not modified» при повторном нажатии — не ошибка
+            if "not modified" not in str(e):
+                log.exception("не удалось обновить сообщение")
+        await c.answer()
 
     @r.message(Command("start", "help"))
     async def start(m: Message):
         await m.answer(
             "Слежу за GitHub <b>{}</b>.\n\n"
+            "Кнопка «{}» внизу — сводка по всем репо, дальше можно провалиться в любой.\n\n"
             "/check — проверить сейчас\n"
             "/stats [дней] — просмотры по репо (по умолчанию 30)\n"
             "/week — сводка просмотров за 7 дней\n"
             "/report — полный отчёт за 7 дней прямо сейчас\n"
             "/sources — откуда приходят\n\n"
-            "Последний проход: {}".format(app.s.github_user, app.store.get_meta("last_cycle", "ещё не было")))
+            "Последний проход: {}".format(app.s.github_user, REPORT_BUTTON,
+                                          app.store.get_meta("last_cycle", "ещё не было")),
+            reply_markup=MAIN_KB)
 
     @r.message(Command("check"))
     async def check(m: Message):
