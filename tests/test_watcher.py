@@ -19,7 +19,8 @@ class FakeGitHub:
         self.views = {"bot": [{"timestamp": "2026-10-20T00:00:00Z", "count": 2, "uniques": 1}]}
         self.refs = {"bot": [{"referrer": "Google", "count": 2, "uniques": 1}]}
         self.stars = {"bot": 1}
-        self.watchers = {"bot": 1}
+        self.watchers = {"bot": 1}          # счётчик GitHub, включая владельца
+        self.own_watch = {"bot"}            # владелец подписан на свой репо
         self.forks = {"bot": []}
         self.followers = ["fan"]
         self.broken = set()  # репо, на которых API отвечает 500
@@ -28,6 +29,9 @@ class FakeGitHub:
         p = req.url.path
         if p == "/user/repos":
             return httpx.Response(200, json=self.repos)
+        if p == "/user/subscriptions":
+            return httpx.Response(200, json=[{"name": r, "owner": {"login": USER}} for r in self.own_watch]
+                                  + [{"name": "linux", "owner": {"login": "torvalds"}}])
         if p == f"/users/{USER}/followers":
             return httpx.Response(200, json=[{"login": x} for x in self.followers])
         parts = p.split("/")
@@ -151,3 +155,18 @@ async def test_failed_endpoint_does_not_lose_other_data(env):
     assert bot.error and "referrers" in bot.error
     assert bot.views == 7            # просмотры всё равно посчитаны
     assert bot.stars_delta == 2      # и звёзды тоже
+
+
+async def test_owner_subscription_is_not_counted(env):
+    fake, gh, store = env
+    res = await run_cycle(gh, store, False)
+    assert res.repos[0].watchers == 0          # единственный подписчик — сам владелец
+
+    fake.watchers["bot"] = 2                   # подписался кто-то ещё
+    res = await run_cycle(gh, store, False)
+    assert (res.repos[0].watchers, res.repos[0].watchers_delta) == (1, 1)
+
+    fake.watchers["bot"] = 1                   # владелец отписался — цифра не меняется
+    fake.own_watch = set()
+    res = await run_cycle(gh, store, False)
+    assert (res.repos[0].watchers, res.repos[0].watchers_delta) == (1, 0)

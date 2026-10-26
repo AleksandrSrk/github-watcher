@@ -49,7 +49,7 @@ class CycleResult:
     error: str | None = None
 
 
-async def check_repo(gh: GitHub, store: Store, repo: str) -> RepoReport:
+async def check_repo(gh: GitHub, store: Store, repo: str, own_watch: bool = False) -> RepoReport:
     """Каждый источник обрабатывается отдельно: сбой одного запроса не теряет остальные данные."""
     rep = RepoReport(repo)
     names = ("views", "clones", "referrers", "paths", "counters", "forks", "issues")
@@ -82,7 +82,8 @@ async def check_repo(gh: GitHub, store: Store, repo: str) -> RepoReport:
     if "counters" in data:
         rep.stars = data["counters"]["star"]
         rep.stars_delta = store.update_counter(repo, "star", rep.stars)
-        rep.watchers = data["counters"]["watch"]
+        # владелец сам подписан на свой репо — его не считаем
+        rep.watchers = max(0, data["counters"]["watch"] - (1 if own_watch else 0))
         rep.watchers_delta = store.update_counter(repo, "watch", rep.watchers)
     if "forks" in data:
         rep.forks_added, _ = store.sync_members("fork", repo, data["forks"])
@@ -103,11 +104,17 @@ async def run_cycle(gh: GitHub, store: Store, include_private: bool) -> CycleRes
     # список репо тоже храним как «участников»: так новые и пропавшие ловятся тем же механизмом
     repos_added, repos_removed = store.sync_members("repo", "", set(repos))
 
+    try:
+        own = await gh.own_subscriptions()
+    except Exception as e:
+        log.warning("не удалось получить свои подписки, подписчики репо считаются с владельцем: %s", e)
+        own = set()
+
     sem = asyncio.Semaphore(CONCURRENCY)
 
     async def limited(repo: str) -> RepoReport:
         async with sem:
-            return await check_repo(gh, store, repo)
+            return await check_repo(gh, store, repo, own_watch=repo in own)
 
     reports = await asyncio.gather(*(limited(r) for r in repos))
     result = CycleResult(repos=list(reports), repos_added=repos_added, repos_removed=repos_removed)

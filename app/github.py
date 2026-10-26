@@ -62,6 +62,12 @@ class GitHub:
         r = (await self._get(f"/repos/{self.user}/{repo}")).json()
         return {"star": r.get("stargazers_count", 0), "watch": r.get("subscribers_count", 0)}
 
+    async def own_subscriptions(self) -> set[str]:
+        """Репо владельца, на которые он сам подписан (GitHub подписывает автора автоматически).
+        Их вычитаем из счётчика подписчиков, чтобы считать только чужих."""
+        data = await self._paged("/user/subscriptions")
+        return {r["name"] for r in data if r["owner"]["login"].lower() == self.user.lower()}
+
     # --- трафик (хранится на GitHub только 14 дней) ---------------------------
     async def traffic(self, repo: str, kind: str) -> list[dict]:
         """kind: views | clones. Возвращает [{'day': 'YYYY-MM-DD', 'count': n, 'uniques': u}]."""
