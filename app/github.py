@@ -11,41 +11,53 @@ class GitHubError(Exception):
     pass
 
 
+HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "github-watcher",
+}
+
+
 class GitHub:
-    def __init__(self, token: str, user: str, client: httpx.AsyncClient | None = None):
+    def __init__(self, token: str, user: str, client: httpx.AsyncClient | None = None,
+                 public_client: httpx.AsyncClient | None = None):
         self.user = user
         self._client = client or httpx.AsyncClient(
-            base_url=API,
-            timeout=30,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "github-watcher",
-            },
-        )
+            base_url=API, timeout=30, headers={**HEADERS, "Authorization": f"Bearer {token}"})
+        # Без токена: fine-grained токен не пускает к спискам звёзд и подписчиков (403),
+        # а для публичных репо эти данные открыты всем. Лимит — 60 запросов в час.
+        self._public = public_client or httpx.AsyncClient(base_url=API, timeout=30, headers=HEADERS)
 
     async def close(self):
         await self._client.aclose()
+        await self._public.aclose()
 
-    async def _get(self, path: str, params: dict | None = None, accept: str | None = None):
-        headers = {"Accept": accept} if accept else None
-        r = await self._client.get(path, params=params, headers=headers)
+    async def _get(self, path: str, params: dict | None = None, public: bool = False):
+        r = await (self._public if public else self._client).get(path, params=params)
         if r.status_code == 403 and r.headers.get("x-ratelimit-remaining") == "0":
-            raise GitHubError("исчерпан лимит запросов GitHub API")
+            raise GitHubError("исчерпан лимит запросов GitHub API" + (" (без токена)" if public else ""))
         if r.status_code >= 400:
             raise GitHubError(f"{path}: HTTP {r.status_code} {r.text[:200]}")
         return r
 
-    async def _paged(self, path: str, params: dict | None = None, accept: str | None = None) -> list:
+    async def _paged(self, path: str, params: dict | None = None, public: bool = False) -> list:
         """Собирает все страницы по заголовку Link."""
         items, url, p = [], path, {"per_page": 100, **(params or {})}
         while url:
-            r = await self._get(url, params=p, accept=accept)
+            r = await self._get(url, params=p, public=public)
             items.extend(r.json())
             url = r.links.get("next", {}).get("url")
             p = None  # в next-ссылке параметры уже есть
         return items
+
+    async def _paged_public_fallback(self, path: str) -> list:
+        """Сначала с токеном; если токену не хватает прав (403) — публичный запрос без токена."""
+        try:
+            return await self._paged(path)
+        except GitHubError as e:
+            if "HTTP 403" not in str(e):
+                raise
+            return await self._paged(path, public=True)
 
     # --- репозитории ---------------------------------------------------------
     async def repos(self, include_private: bool) -> list[str]:
@@ -74,19 +86,19 @@ class GitHub:
 
     # --- люди ----------------------------------------------------------------
     async def stargazers(self, repo: str) -> set[str]:
-        data = await self._paged(f"/repos/{self.user}/{repo}/stargazers")
+        data = await self._paged_public_fallback(f"/repos/{self.user}/{repo}/stargazers")
         return {x["login"] for x in data}
 
     async def forks(self, repo: str) -> set[str]:
-        data = await self._paged(f"/repos/{self.user}/{repo}/forks")
+        data = await self._paged_public_fallback(f"/repos/{self.user}/{repo}/forks")
         return {x["owner"]["login"] for x in data}
 
     async def watchers(self, repo: str) -> set[str]:
-        data = await self._paged(f"/repos/{self.user}/{repo}/subscribers")
+        data = await self._paged_public_fallback(f"/repos/{self.user}/{repo}/subscribers")
         return {x["login"] for x in data} - {self.user}
 
     async def followers(self) -> set[str]:
-        data = await self._paged(f"/users/{self.user}/followers")
+        data = await self._paged_public_fallback(f"/users/{self.user}/followers")
         return {x["login"] for x in data}
 
     async def foreign_issues(self, repo: str) -> list[dict]:
